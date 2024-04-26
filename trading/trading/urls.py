@@ -3,7 +3,7 @@ from rest_framework.routers import DefaultRouter
 from trading.views import StockViewSet, UserOrderViewSet, TradeAPIView
 
 router = DefaultRouter()
-router.register(r"stocks", StockViewSet)
+router.register(r"stocks", StockViewSet, basename="stock")
 router.register(r"user/orders", UserOrderViewSet, basename="user-orders")
 
 

@@ -25,7 +25,6 @@ class UserOrderViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=False, methods=["get"])
     def total(self, request, *args, **kwargs):
-        queryset = self.get_queryset()
         stock_id = request.query_params.get("stock_id")
         if not stock_id:
             return Response(
@@ -34,14 +33,17 @@ class UserOrderViewSet(viewsets.ReadOnlyModelViewSet):
             )
 
         try:
+            Stock.objects.get(id=stock_id)
+            queryset = self.get_queryset()
             orders = queryset.filter(stock_id=stock_id)
             total = sum(order.value() for order in orders)
             return Response(
                 {"stock_id": stock_id, "total": total}, status=status.HTTP_200_OK
             )
-        except Order.DoesNotExist:
+        except Stock.DoesNotExist:
             return Response(
-                {"error": "Orders not found"}, status=status.HTTP_404_NOT_FOUND
+                {"error": f"Stock ID: {stock_id} not found"},
+                status=status.HTTP_404_NOT_FOUND,
             )
 
 
@@ -52,45 +54,65 @@ class TradeAPIView(APIView):
     def post(self, request, format=None):
         if "csv" in request.FILES:
             trades = self.parse_csv(request.FILES["csv"])
-            serializer = self.serializer_class(
-                data=trades, many=True, context={"request": request}
-            )
-            if serializer.is_valid():
-                serializer.save(user=request.user)
-                return Response(serializer.data, status=status.HTTP_201_CREATED)
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            for trade in trades:
+                serializer = self.serializer_class(
+                    data=trade, context={"request": request}
+                )
+                if serializer.is_valid():
+                    sell_exceeds = self.check_sell_exceeding_owned_stock(
+                        serializer, request
+                    )
+                    if sell_exceeds:
+                        return sell_exceeds
+
+                    serializer.save(user=request.user)
+                else:
+                    return Response(
+                        serializer.errors, status=status.HTTP_400_BAD_REQUEST
+                    )
+
+            return Response(serializer.data, status=status.HTTP_201_CREATED)
         else:
             serializer = self.serializer_class(data=request.data)
             if serializer.is_valid():
-                # Validate sell orders so user can not sell more than owned stock.
-                is_sell_order = serializer.validated_data.get("is_buy_or_sell") == -1
-                if is_sell_order:
-                    stock_id = serializer.validated_data.get("stock").id
-                    quantity = serializer.validated_data.get("quantity")
-                    stock_price = Stock.objects.get(pk=stock_id).price
-                    selling_value = stock_price * quantity * is_sell_order
-
-                    user_owned_orders = Order.objects.filter(
-                        user=request.user, stock_id=stock_id
-                    )
-                    user_owned_orders_total_value = sum(
-                        order.value() for order in user_owned_orders
-                    )
-
-                    if (
-                        user_owned_orders_total_value is not None
-                        and selling_value > user_owned_orders_total_value
-                    ):
-                        return Response(
-                            {
-                                "error": f"Unable to sell more than owned stock. Selling: {selling_value}, Owned: {user_owned_orders_total_value}"
-                            },
-                            status=status.HTTP_400_BAD_REQUEST,
-                        )
+                sell_exceeds = self.check_sell_exceeding_owned_stock(
+                    serializer, request
+                )
+                if sell_exceeds:
+                    return sell_exceeds
 
                 serializer.save(user=request.user)
                 return Response(serializer.data, status=status.HTTP_201_CREATED)
+
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def check_sell_exceeding_owned_stock(self, serializer: TradeSerializer, request):
+        is_sell_order = serializer.validated_data.get("is_buy_or_sell") == -1
+        if is_sell_order:
+            stock_id = serializer.validated_data.get("stock").id
+            quantity = serializer.validated_data.get("quantity")
+            stock_price = Stock.objects.get(pk=stock_id).price
+            selling_value = stock_price * quantity * is_sell_order
+
+            user_owned_orders = Order.objects.filter(
+                user=request.user, stock_id=stock_id
+            )
+            user_owned_orders_total_value = sum(
+                order.value() for order in user_owned_orders
+            )
+
+            if (
+                user_owned_orders_total_value is not None
+                and selling_value > user_owned_orders_total_value
+            ):
+                return Response(
+                    {
+                        "error": f"Unable to sell more than owned stock. Selling: {selling_value}, Owned: {user_owned_orders_total_value}"
+                    },
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        return None
 
     def parse_csv(self, csv_file):
         trades = []
